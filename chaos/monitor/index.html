@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>minikafka · lag monitor</title>
+<style>
+  :root {
+    --bg: #0b0e14; --panel: #12161f; --panel2: #171c27; --line: #232a38;
+    --text: #dbe2ef; --muted: #7c8698; --accent: #4cc9f0;
+    --ok: #3ddc97; --warn: #ffb703; --bad: #ef476f;
+    font-size: 15px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 14px 20px; border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  header h1 { font-size: 1.05rem; margin: 0; font-weight: 600; }
+  header h1 span { color: var(--accent); }
+  .chip {
+    padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px;
+    color: var(--muted); font-size: .8rem; background: var(--panel2);
+  }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+         margin-right: 6px; background: var(--bad); }
+  .dot.up { background: var(--ok); }
+  #banner {
+    display: none; padding: 10px 20px; font-weight: 600;
+    background: #3b0d1e; color: #ff9db4; border-bottom: 1px solid #5c142e;
+  }
+  #banner.on { display: block; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { background: #4d1027; } }
+  main { padding: 18px 20px; display: grid; gap: 16px;
+         max-width: 1250px; margin: 0 auto; }
+  .cards { display: grid; gap: 12px;
+           grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .card .k { color: var(--muted); font-size: .72rem;
+             text-transform: uppercase; letter-spacing: .08em; }
+  .card .v { font-size: 1.45rem; margin-top: 4px; font-weight: 600; }
+  .card .v.bad { color: var(--bad); } .card .v.ok { color: var(--ok); }
+  section.panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px;
+  }
+  section.panel h2 {
+    margin: 0 0 10px; font-size: .8rem; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .08em; font-weight: 600;
+  }
+  canvas { width: 100%; height: 260px; display: block; }
+  #legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 10px;
+            font-size: .78rem; color: var(--muted); }
+  #legend .sw { display: inline-block; width: 10px; height: 10px;
+                border-radius: 2px; margin-right: 5px; }
+  .cols { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; }
+  @media (max-width: 900px) { .cols { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; font-size: .82rem; }
+  th, td { text-align: right; padding: 6px 8px;
+           border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: .72rem;
+       text-transform: uppercase; letter-spacing: .06em; }
+  th:first-child, td:first-child { text-align: left; }
+  td.owner { text-align: left; color: var(--muted); }
+  td.owner .none { color: var(--bad); }
+  .badge { padding: 2px 8px; border-radius: 999px; font-size: .72rem; }
+  .badge.ok { background: #0e2b20; color: var(--ok); }
+  .badge.alert { background: #3b0d1e; color: var(--bad); }
+  #feed { list-style: none; margin: 0; padding: 0; font-size: .8rem;
+          max-height: 340px; overflow-y: auto; }
+  #feed li { padding: 6px 4px; border-bottom: 1px solid var(--line); }
+  #feed .t { color: var(--muted); margin-right: 8px; }
+  #feed .fired { color: var(--bad); } #feed .resolved { color: var(--ok); }
+  #feed .empty { color: var(--muted); padding: 10px 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mini<span>kafka</span> · consumer-lag monitor</h1>
+  <span class="chip"><span class="dot" id="brokerDot"></span><span id="brokerLabel">broker</span></span>
+  <span class="chip">group <b id="groupName">–</b></span>
+  <span class="chip">generation <b id="generation">–</b></span>
+  <span class="chip">threshold <b id="threshold">–</b></span>
+</header>
+<div id="banner"></div>
+<main>
+  <div class="cards">
+    <div class="card"><div class="k">total lag</div><div class="v" id="totalLag">–</div></div>
+    <div class="card"><div class="k">produced (end offsets)</div><div class="v" id="produced">–</div></div>
+    <div class="card"><div class="k">committed</div><div class="v" id="committed">–</div></div>
+    <div class="card"><div class="k">consumers online</div><div class="v" id="members">–</div></div>
+    <div class="card"><div class="k">alerts fired</div><div class="v" id="firedTotal">–</div></div>
+  </div>
+
+  <section class="panel">
+    <h2>lag per partition (last <span id="windowLabel">–</span>)</h2>
+    <canvas id="chart"></canvas>
+    <div id="legend"></div>
+  </section>
+
+  <div class="cols">
+    <section class="panel">
+      <h2>partitions</h2>
+      <table>
+        <thead><tr>
+          <th>partition</th><th>end</th><th>committed</th><th>lag</th>
+          <th style="text-align:left">owner</th><th>status</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <h2>alert feed</h2>
+      <ul id="feed"><li class="empty">no alerts yet</li></ul>
+    </section>
+  </div>
+</main>
+
+<script>
+const PALETTE = ["#4cc9f0", "#3ddc97", "#ffb703", "#ef476f", "#b388eb",
+                 "#f4845f", "#90e0ef", "#e2f14e", "#ff70a6", "#6ee7b7"];
+const $ = id => document.getElementById(id);
+const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(2) + "M"
+             : n >= 1e4 ? (n / 1e3).toFixed(1) + "k"
+             : n.toLocaleString();
+const hhmmss = ts => new Date(ts * 1000).toTimeString().slice(0, 8);
+let seriesColors = {};
+
+function colorFor(tp) {
+  if (!(tp in seriesColors)) {
+    seriesColors[tp] = PALETTE[Object.keys(seriesColors).length % PALETTE.length];
+  }
+  return seriesColors[tp];
+}
+
+function drawChart(history, threshold, activeSet) {
+  const canvas = $("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  const padL = 52, padR = 10, padT = 10, padB = 22;
+  const iw = w - padL - padR, ih = h - padT - padB;
+
+  const tps = [...new Set(history.flatMap(s => Object.keys(s.lags)))].sort();
+  let maxLag = threshold * 1.25;
+  for (const s of history)
+    for (const v of Object.values(s.lags)) maxLag = Math.max(maxLag, v * 1.1);
+
+  const x = i => padL + (history.length <= 1 ? 0 : i / (history.length - 1) * iw);
+  const y = v => padT + ih - (v / maxLag) * ih;
+
+  ctx.font = "10px ui-monospace, monospace";
+  ctx.strokeStyle = "#232a38"; ctx.fillStyle = "#7c8698";
+  for (let g = 0; g <= 4; g++) {
+    const v = maxLag * g / 4, yy = y(v);
+    ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(w - padR, yy); ctx.stroke();
+    ctx.fillText(fmt(Math.round(v)), 4, yy + 3);
+  }
+  if (history.length > 1) {
+    ctx.textAlign = "center";
+    ctx.fillText(hhmmss(history[0].ts), padL + 24, h - 6);
+    ctx.fillText(hhmmss(history[history.length - 1].ts), w - padR - 28, h - 6);
+    ctx.textAlign = "left";
+  }
+
+  // threshold line
+  ctx.save();
+  ctx.strokeStyle = "#ef476f"; ctx.setLineDash([6, 5]); ctx.lineWidth = 1.2;
+  ctx.beginPath(); ctx.moveTo(padL, y(threshold)); ctx.lineTo(w - padR, y(threshold));
+  ctx.stroke(); ctx.restore();
+  ctx.fillStyle = "#ef476f";
+  ctx.fillText("alert threshold", padL + 6, y(threshold) - 5);
+
+  for (const tp of tps) {
+    ctx.strokeStyle = colorFor(tp);
+    ctx.lineWidth = activeSet.has(tp) ? 2.4 : 1.5;
+    ctx.beginPath();
+    let started = false;
+    history.forEach((s, i) => {
+      if (!(tp in s.lags)) return;
+      const xx = x(i), yy = y(s.lags[tp]);
+      started ? ctx.lineTo(xx, yy) : ctx.moveTo(xx, yy);
+      started = true;
+    });
+    ctx.stroke();
+  }
+
+  const last = history[history.length - 1] || { lags: {} };
+  $("legend").innerHTML = tps.map(tp =>
+    `<span><span class="sw" style="background:${colorFor(tp)}"></span>` +
+    `${tp}: ${fmt(last.lags[tp] ?? 0)}</span>`).join("");
+  const span = history.length > 1
+    ? Math.round(history[history.length - 1].ts - history[0].ts) : 0;
+  $("windowLabel").textContent =
+    span >= 120 ? Math.round(span / 60) + " min" : span + "s";
+}
+
+function render(st) {
+  $("brokerDot").className = "dot" + (st.broker_up ? " up" : "");
+  $("brokerLabel").textContent = st.broker_up ? "broker up" : "broker DOWN";
+  $("groupName").textContent = st.sample.group.name;
+  $("generation").textContent = st.sample.group.generation ?? "–";
+  $("threshold").textContent = fmt(st.threshold);
+  $("firedTotal").textContent = st.fired_total;
+
+  const parts = st.sample.partitions;
+  const totalLag = parts.reduce((a, p) => a + p.lag, 0);
+  $("totalLag").textContent = fmt(totalLag);
+  $("totalLag").className = "v" + (st.active_alerts.length ? " bad" : " ok");
+  $("produced").textContent = fmt(parts.reduce((a, p) => a + p.end, 0));
+  $("committed").textContent = fmt(parts.reduce((a, p) => a + p.committed, 0));
+  $("members").textContent = st.sample.group.members.length;
+
+  const banner = $("banner");
+  if (st.active_alerts.length) {
+    banner.className = "on";
+    banner.textContent = "🔥 LAG ALERT — " + st.active_alerts.join(", ") +
+      " over threshold " + fmt(st.threshold);
+  } else {
+    banner.className = ""; banner.textContent = "";
+  }
+  document.title = (st.active_alerts.length ? "🔥 " : "") +
+    "lag " + fmt(totalLag) + " · minikafka";
+
+  $("rows").innerHTML = parts.map(p => `<tr>
+    <td>${p.tp}</td><td>${p.end.toLocaleString()}</td>
+    <td>${p.committed.toLocaleString()}</td>
+    <td style="color:${p.alert ? "var(--bad)" : "inherit"}">${p.lag.toLocaleString()}</td>
+    <td class="owner">${p.owner ?? '<span class="none">unassigned</span>'}</td>
+    <td><span class="badge ${p.alert ? "alert" : "ok"}">${p.alert ? "ALERT" : "OK"}</span></td>
+  </tr>`).join("");
+
+  $("feed").innerHTML = st.alerts.length
+    ? st.alerts.map(a => `<li><span class="t">${hhmmss(a.ts)}</span>` +
+        `<span class="${a.type}">${a.type === "fired" ? "🔥 fired" : "✅ resolved"}</span> ` +
+        `${a.tp} lag ${fmt(a.lag)}</li>`).join("")
+    : '<li class="empty">no alerts yet</li>';
+
+  drawChart(st.history, st.threshold, new Set(st.active_alerts));
+}
+
+async function tick() {
+  try {
+    const resp = await fetch("/api/state");
+    render(await resp.json());
+  } catch (e) {
+    $("brokerDot").className = "dot";
+    $("brokerLabel").textContent = "monitor unreachable";
+  }
+}
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

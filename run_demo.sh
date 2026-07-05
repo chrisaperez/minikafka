@@ -18,7 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python3 -m minikafka.server --port "$BROKER_PORT" --data-dir ./data &
+python3 -m minikafka.server --broker-id b1 --port "$BROKER_PORT" --data-dir ./data &
 pids+=($!)
 sleep 1
 

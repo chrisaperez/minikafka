@@ -19,12 +19,14 @@ class ClientError(Exception):
 
 
 def _request(method, url, body=None, timeout=30.0):
+    if not url.startswith(("http://", "https://")):
+        raise ValueError(f"Invalid URL scheme: {url}")
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
         url, data=data, method=method,
         headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
             return json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as e:
         try:
@@ -141,7 +143,8 @@ class Consumer:
     def __init__(self, broker_url, group, topics, consumer_id=None,
                  auto_offset_reset="earliest", heartbeat_interval=3.0,
                  fetch_max_records=500):
-        assert auto_offset_reset in ("earliest", "latest")
+        if auto_offset_reset not in ("earliest", "latest"):
+            raise ValueError(f"Invalid auto_offset_reset: {auto_offset_reset}")
         self.url = broker_url.rstrip("/")
         self.group = group
         self.topics = list(topics)
@@ -345,5 +348,5 @@ class Consumer:
                 _request("POST", f"{self.url}/groups/leave", {
                     "group": self.group, "consumer_id": self.consumer_id,
                 }, timeout=5.0)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[Consumer {self.consumer_id}] Leave group failed: {e}")

@@ -52,9 +52,12 @@ class _Handler(BaseHTTPRequestHandler):
         if length == 0:
             return {}
         try:
-            return json.loads(self.rfile.read(length))
+            body = json.loads(self.rfile.read(length))
         except json.JSONDecodeError:
             raise BadRequest("request body is not valid JSON")
+        if not isinstance(body, dict):
+            raise BadRequest("request body must be a JSON object")
+        return body
 
     def _dispatch(self, fn):
         try:
@@ -65,7 +68,10 @@ class _Handler(BaseHTTPRequestHandler):
             pass
         except Exception:
             traceback.print_exc()
-            self._send(500, {"error": "internal", "message": "internal error"})
+            try:
+                self._send(500, {"error": "internal", "message": "internal error"})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
 
     # -- routes ------------------------------------------------------------
 
@@ -96,6 +102,7 @@ class _Handler(BaseHTTPRequestHandler):
                     _as_int(q, "offset"),
                     max_records=_as_int(q, "max_records", 500),
                     wait_ms=_as_int(q, "wait_ms", 0),
+                    replica_id=q.get("replica_id")
                 )
             if url.path == "/groups":
                 return 200, {"groups": b.coordinator.describe()}
@@ -117,7 +124,15 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._body()
             if url.path == "/topics":
                 return 201, b.create_topic(
-                    body.get("name"), body.get("partitions", 1))
+                    body.get("name"), 
+                    body.get("partitions", 1),
+                    body.get("replication_factor", 1)
+                )
+            if url.path == "/topics/compact":
+                return 200, b.compact(
+                    body.get("topic", ""),
+                    body.get("partition", 0)
+                )
             if url.path == "/produce":
                 results = b.produce(
                     body.get("topic", ""),
@@ -141,9 +156,21 @@ class _Handler(BaseHTTPRequestHandler):
                     body.get("group"), body.get("consumer_id"),
                     body.get("generation"), body.get("offsets") or {})
             return 404, {"error": "not_found", "message": url.path}
-
+        
         self._dispatch(route)
 
+    def do_DELETE(self):
+        url = urlparse(self.path)
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        b = self.broker
+        def route():
+            if url.path == "/topics":
+                name = q.get("name")
+                if not name:
+                    raise BadRequest("name query parameter is required")
+                return 200, b.delete_topic(name)
+            return 404, {"error": "not_found", "message": url.path}
+        self._dispatch(route)
 
 def _as_int(q, name, default=None):
     raw = q.get(name)
@@ -168,6 +195,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="minikafka broker")
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=9092)
+    ap.add_argument("--broker-id", required=True, help="unique broker id (e.g. broker-1)")
+    ap.add_argument("--zk-url", default=None, help="url of the Zookeeper registry (e.g. http://127.0.0.1:2181)")
     ap.add_argument("--data-dir", default=None,
                     help="enable persistence; logs+offsets survive restarts")
     ap.add_argument("--retention-max-records", type=int, default=None,
@@ -177,19 +206,26 @@ def main(argv=None):
                          "evicted from its group")
     ap.add_argument("--fsync", action="store_true",
                     help="fsync after every append (durable but slower)")
+    ap.add_argument("--segment-bytes", type=int, default=256*1024*1024,
+                    help="max bytes per segment file")
     args = ap.parse_args(argv)
 
     broker = Broker(
+        broker_id=args.broker_id,
+        host=args.host,
+        port=args.port,
+        zk_url=args.zk_url,
         data_dir=args.data_dir,
         retention_max_records=args.retention_max_records,
         session_timeout=args.session_timeout,
         fsync=args.fsync,
+        segment_bytes=args.segment_bytes,
     )
     broker.coordinator.start_reaper()
     httpd = make_server(broker, args.host, args.port)
     mode = f"persistent (data dir: {args.data_dir})" if args.data_dir \
         else "in-memory"
-    print(f"minikafka broker listening on http://{args.host}:{args.port} "
+    print(f"minikafka broker {args.broker_id} listening on http://{args.host}:{args.port} "
           f"[{mode}]", flush=True)
     try:
         httpd.serve_forever()

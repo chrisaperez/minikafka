@@ -63,3 +63,8 @@ class StaleGeneration(BrokerError):
 
     status = 409
     code = "stale_generation"
+
+
+class NotLeaderForPartition(BrokerError):
+    status = 403
+    code = "not_leader_for_partition"

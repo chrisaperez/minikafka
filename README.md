@@ -6,10 +6,10 @@ simulator** with a real-time monitoring dashboard on top.
 
 ```
                         ┌──────────────────────────────┐
-                        │  Zookeeper (optional)         │
-                        │  HTTP registry, port 2181     │
-                        │   ├─ live brokers             │
-                        │   └─ topic → leader/replicas  │
+                        │  Zookeeper (optional)        │
+                        │  HTTP registry, port 2181    │
+                        │   ├─ live brokers            │
+                        │   └─ topic → leader/replicas │
                         └───────────────┬──────────────┘
                      register / sync    │   (--zk-url)
         ┌───────────────────────────────┼───────────────────────────────┐
